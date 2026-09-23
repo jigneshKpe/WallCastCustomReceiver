@@ -29,6 +29,15 @@
       background: var(--bg);
     }
 
+    /* Required by CAF but never used: we render the screen into #video instead. Kept in the
+       layout (not display:none) so the framework can still measure it, just out of sight. */
+    #castPlayer {
+      position: fixed;
+      width: 1px; height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
     /* Idle / status card, shown until a track is actually playing. */
     #panel {
       position: fixed;
@@ -75,6 +84,14 @@
   </style>
 </head>
 <body>
+  <!--
+    CAF requires a <cast-media-player> in the DOM. Without it CastReceiverContext.start()
+    fails during initialisation and the receiver never becomes ready — the TV just shows a
+    blank or default screen. We never play a media item, so it stays hidden; the live screen
+    is rendered into our own <video> below.
+  -->
+  <cast-media-player id="castPlayer"></cast-media-player>
+
   <video id="video" autoplay muted playsinline></video>
 
   <div id="panel">
@@ -265,8 +282,13 @@
       options.customNamespaces = {};
       options.customNamespaces[NAMESPACE] = cast.framework.system.MessageType.JSON;
 
-      context.start(options);
-      log('receiver started, listening on ' + NAMESPACE);
+      try {
+        context.start(options);
+        log('receiver started, listening on ' + NAMESPACE);
+      } catch (err) {
+        log('context.start() failed: ' + err.message, true);
+        setState('error', 'Receiver failed to start', err.message);
+      }
     })();
   </script>
 </body>
