@@ -440,7 +440,16 @@
       });
 
       context.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function () {
-        log('sender disconnected');
+        // The Cast session only ever carried the handshake. Once the peer connection is up,
+        // frames travel straight from the phone's Broadcast Extension to this page, and that
+        // extension keeps running even if the user swipes the iPhone app away. So a sender
+        // going away is not a reason to stop mirroring — tearing down here is what used to
+        // end the mirror the moment the app was closed.
+        const live = pc && (pc.iceConnectionState === 'connected' ||
+                            pc.iceConnectionState === 'completed');
+        log('sender disconnected; peer connection live=' + !!live);
+        if (live) return;
+
         teardown();
         setState('idle', 'Ready to connect',
           'Open <strong>WallCast</strong> on your iPhone, choose this TV, then tap Start Mirroring.');
