@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Screen Mirroring Receiver</title>
+  <style>
+    :root {
+      --bg: #000;
+      --fg: #eceff4;
+      --muted: #8a93a6;
+      --accent: #5b8def;
+      --bad: #ef5b5b;
+      --good: #4ec98a;
+    }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      overflow: hidden;
+      font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    }
+
+    #video {
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      background: var(--bg);
+    }
+
+    /* Idle / status card, shown until a track is actually playing. */
+    #panel {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      padding: 6vh 8vw;
+      text-align: center;
+      color: var(--fg);
+      background: radial-gradient(circle at 50% 40%, #131822 0%, #000 70%);
+    }
+
+    #panel[hidden] { display: none; }
+
+    #title { font-size: 3.2vw; font-weight: 600; letter-spacing: -0.02em; }
+    #detail { font-size: 1.7vw; color: var(--muted); line-height: 1.5; max-width: 60ch; }
+
+    #dot {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--muted);
+      box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.05);
+    }
+    #dot.live { background: var(--good); }
+    #dot.error { background: var(--bad); }
+
+    /* Diagnostics: invaluable on a TV, where there is no console to open. */
+    #log {
+      position: fixed;
+      left: 2vw; bottom: 2vh;
+      max-width: 60vw; max-height: 34vh;
+      overflow: hidden;
+      font: 12px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+      color: var(--muted);
+      white-space: pre-wrap;
+      pointer-events: none;
+      text-shadow: 0 1px 2px #000;
+    }
+    #log[hidden] { display: none; }
+    #log b { color: var(--accent); font-weight: 600; }
+    #log .bad { color: var(--bad); }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay muted playsinline></video>
+
+  <div id="panel">
+    <div id="dot"></div>
+    <div id="title">Waiting for your iPhone…</div>
+    <div id="detail">
+      Open Screen Mirroring on your iPhone, pick this TV, then tap Start Mirroring.
+      Both devices must be on the same Wi-Fi network.
+    </div>
+  </div>
+
+  <pre id="log"></pre>
+
+  <!-- CAF receiver SDK. Must load before the script below. -->
+  <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      // Must match GoogleCastBridge.streamNamespace on the iOS side.
+      const NAMESPACE = 'urn:x-cast:com.mirror.everything.stream';
+
+      // Append ?debug=0 to the receiver URL to hide the on-screen log once things work.
+      const params = new URLSearchParams(location.search);
+      const showLog = params.get('debug') !== '0';
+
+      const video = document.getElementById('video');
+      const panel = document.getElementById('panel');
+      const dot = document.getElementById('dot');
+      const title = document.getElementById('title');
+      const detail = document.getElementById('detail');
+      const logEl = document.getElementById('log');
+
+      logEl.hidden = !showLog;
+
+      const lines = [];
+      function log(message, isError) {
+        const stamp = new Date().toISOString().substr(11, 8);
+        lines.push(
+          '<b>' + stamp + '</b> ' +
+          (isError ? '<span class="bad">' + message + '</span>' : message)
+        );
+        // Keep only what fits comfortably on screen.
+        if (lines.length > 14) lines.shift();
+        logEl.innerHTML = lines.join('\n');
+        (isError ? console.error : console.log)('[receiver]', message);
+      }
+
+      function setState(state, heading, note) {
+        dot.className = state;
+        title.textContent = heading;
+        if (note !== undefined) detail.textContent = note;
+        panel.hidden = state === 'live';
+      }
+
+      let pc = null;
+
+      function teardown() {
+        if (!pc) return;
+        try { pc.close(); } catch (_) {}
+        pc = null;
+        video.srcObject = null;
+      }
+
+      /**
+       * The phone sends one complete SDP offer — non-trickle, so every ICE candidate is
+       * already inside it — and we answer the same way. Media then flows peer-to-peer
+       * across the local network, never through Google's servers or ours.
+       *
+       * WebRTC is what makes this possible from an HTTPS page: a peer connection is not
+       * subject to the mixed-content rule that blocks ws:// to a LAN address, and its DTLS
+       * uses self-signed certificates, so there is no certificate to obtain and nothing to
+       * install on the TV.
+       */
+      async function handleOffer(sdp) {
+        teardown();
+        setState('', 'Connecting…', 'Negotiating with your iPhone.');
+        log('offer received (' + sdp.length + ' bytes)');
+
+        pc = new RTCPeerConnection({ iceServers: [] });
+
+        pc.ontrack = function (event) {
+          log('track received: ' + event.track.kind);
+          video.srcObject = event.streams[0];
+          video.play().catch(function (err) {
+            log('video.play() rejected: ' + err.message, true);
+          });
+        };
+
+        pc.oniceconnectionstatechange = function () {
+          if (!pc) return;
+          const state = pc.iceConnectionState;
+          log('ice: ' + state, state === 'failed');
+          if (state === 'connected' || state === 'completed') {
+            setState('live', '', '');
+          } else if (state === 'failed') {
+            setState('error', 'Connection failed',
+              'The iPhone and this TV could not reach each other. Check they are on the same Wi-Fi network.');
+          } else if (state === 'disconnected' || state === 'closed') {
+            setState('', 'Waiting for your iPhone…',
+              'Mirroring stopped. Tap Start Mirroring again on your iPhone.');
+          }
+        };
+
+        await pc.setRemoteDescription({ type: 'offer', sdp: sdp });
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        // Wait for gathering so the answer carries every candidate in one message.
+        if (pc.iceGatheringState !== 'complete') {
+          await new Promise(function (resolve) {
+            const done = function () {
+              if (!pc || pc.iceGatheringState === 'complete') {
+                if (pc) pc.removeEventListener('icegatheringstatechange', done);
+                resolve();
+              }
+            };
+            pc.addEventListener('icegatheringstatechange', done);
+            // Never hang the session on a stalled gather.
+            setTimeout(resolve, 2000);
+          });
+        }
+
+        log('answer ready');
+        return pc.localDescription.sdp;
+      }
+
+      // ---- Cast wiring -------------------------------------------------------
+
+      if (!window.cast || !cast.framework) {
+        setState('error', 'Receiver SDK failed to load',
+          'Check this page is served over HTTPS and that the TV has internet access.');
+        log('CAF receiver SDK unavailable', true);
+        return;
+      }
+
+      // The SDK loads fine in an ordinary browser — it just has no Cast device to talk to,
+      // and fills the console with failed localhost:8008 IPC attempts. Cast hardware puts
+      // "CrKey" in the user agent, so use that to tell the two apart and say which is which.
+      // Loading this URL in a desktop browser is the quickest way to confirm hosting works.
+      const onCastDevice = /\bCrKey\b/.test(navigator.userAgent);
+      if (!onCastDevice) {
+        setState('', 'Receiver page is live',
+          'Hosting works. This page only mirrors when a Cast device loads it, so the socket errors in the console are expected here.');
+        log('not running on Cast hardware — preview mode');
+      }
+
+      const context = cast.framework.CastReceiverContext.getInstance();
+
+      context.addCustomMessageListener(NAMESPACE, function (event) {
+        let message = event.data;
+        if (typeof message === 'string') {
+          try {
+            message = JSON.parse(message);
+          } catch (err) {
+            log('bad message: ' + err.message, true);
+            return;
+          }
+        }
+        if (!message || message.type !== 'OFFER' || !message.sdp) {
+          log('ignoring message type: ' + (message && message.type));
+          return;
+        }
+
+        handleOffer(message.sdp).then(function (answerSdp) {
+          context.sendCustomMessage(NAMESPACE, event.senderId, {
+            type: 'ANSWER',
+            sdp: answerSdp,
+          });
+          log('answer sent to sender ' + event.senderId);
+        }).catch(function (err) {
+          log('negotiation failed: ' + err.message, true);
+          setState('error', 'Could not start mirroring', err.message);
+        });
+      });
+
+      context.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function () {
+        log('sender disconnected');
+        teardown();
+        setState('', 'Waiting for your iPhone…',
+          'Open Screen Mirroring on your iPhone, pick this TV, then tap Start Mirroring.');
+      });
+
+      // This receiver streams live screen frames rather than playing a media item, so the
+      // built-in media player UI is unused and the idle timeout must not kill the session.
+      const options = new cast.framework.CastReceiverOptions();
+      options.disableIdleTimeout = true;
+      options.customNamespaces = {};
+      options.customNamespaces[NAMESPACE] = cast.framework.system.MessageType.JSON;
+
+      context.start(options);
+      log('receiver started, listening on ' + NAMESPACE);
+    })();
+  </script>
+</body>
+</html>
